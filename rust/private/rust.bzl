@@ -16,7 +16,7 @@
 
 load("//rust/private:common.bzl", "rust_common")
 load("//rust/private:providers.bzl", "BuildInfo")
-load("//rust/private:rustc.bzl", "rustc_compile_action")
+load("//rust/private:rustc.bzl", "OutputDiagnosticsInfo", "rustc_compile_action")
 load(
     "//rust/private:utils.bzl",
     "compute_crate_name",
@@ -66,6 +66,176 @@ def _assert_correct_dep_mapping(ctx):
                     type,
                 ),
             )
+
+def _determine_lib_name(name, crate_type, toolchain, lib_hash = None):
+    """See https://github.com/bazelbuild/rules_rust/issues/405
+
+    Args:
+        name (str): The name of the current target
+        crate_type (str): The `crate_type`
+        toolchain (rust_toolchain): The current `rust_toolchain`
+        lib_hash (str, optional): The hashed crate root path
+
+    Returns:
+        str: A unique library name
+    """
+    extension = None
+    prefix = ""
+    if crate_type in ("dylib", "cdylib", "proc-macro"):
+        extension = toolchain.dylib_ext
+    elif crate_type == "staticlib":
+        extension = toolchain.staticlib_ext
+    elif crate_type in ("lib", "rlib"):
+        # All platforms produce 'rlib' here
+        extension = ".rlib"
+        prefix = "lib"
+    elif crate_type == "bin":
+        fail("crate_type of 'bin' was detected in a rust_library. Please compile " +
+             "this crate as a rust_binary instead.")
+
+    if not extension:
+        fail(("Unknown crate_type: {}. If this is a cargo-supported crate type, " +
+              "please file an issue!").format(crate_type))
+
+    prefix = "lib"
+    if toolchain.target_triple and toolchain.target_triple.system == "windows" and crate_type not in ("lib", "rlib"):
+        prefix = ""
+    if toolchain.target_arch == "wasm32" and crate_type == "cdylib":
+        prefix = ""
+
+    return "{prefix}{name}{lib_hash}{extension}".format(
+        prefix = prefix,
+        name = name,
+        lib_hash = "-" + lib_hash if lib_hash else "",
+        extension = extension,
+    )
+
+def get_edition(attr, toolchain, label):
+    """Returns the Rust edition from either the current rule's attirbutes or the current `rust_toolchain`
+
+    Args:
+        attr (struct): The current rule's attributes
+        toolchain (rust_toolchain): The `rust_toolchain` for the current target
+        label (Label): The label of the target being built
+
+    Returns:
+        str: The target Rust edition
+    """
+    if getattr(attr, "edition"):
+        return attr.edition
+    elif not toolchain.default_edition:
+        fail("Attribute `edition` is required for {}.".format(label))
+    else:
+        return toolchain.default_edition
+
+def _transform_sources(ctx, srcs, crate_root):
+    """Creates symlinks of the source files if needed.
+
+    Rustc assumes that the source files are located next to the crate root.
+    In case of a mix between generated and non-generated source files, this
+    we violate this assumption, as part of the sources will be located under
+    bazel-out/... . In order to allow for targets that contain both generated
+    and non-generated source files, we generate symlinks for all non-generated
+    files.
+
+    Args:
+        ctx (struct): The current rule's context.
+        srcs (List[File]): The sources listed in the `srcs` attribute
+        crate_root (File): The file specified in the `crate_root` attribute,
+                           if it exists, otherwise None
+
+    Returns:
+        Tuple(List[File], File): The transformed srcs and crate_root
+    """
+    has_generated_sources = len([src for src in srcs if not src.is_source]) > 0
+
+    if not has_generated_sources:
+        return srcs, crate_root
+
+    generated_sources = []
+
+    generated_root = crate_root
+    package_root = paths.dirname(ctx.build_file_path)
+
+    if crate_root and (crate_root.is_source or crate_root.root.path != ctx.bin_dir.path):
+        generated_root = ctx.actions.declare_file(paths.relativize(crate_root.short_path, package_root))
+        ctx.actions.symlink(
+            output = generated_root,
+            target_file = crate_root,
+            progress_message = "Creating symlink to source file: {}".format(crate_root.path),
+        )
+    if generated_root:
+        generated_sources.append(generated_root)
+
+    for src in srcs:
+        # We took care of the crate root above.
+        if src == crate_root:
+            continue
+        if src.is_source or src.root.path != ctx.bin_dir.path:
+            src_symlink = ctx.actions.declare_file(paths.relativize(src.short_path, package_root))
+            ctx.actions.symlink(
+                output = src_symlink,
+                target_file = src,
+                progress_message = "Creating symlink to source file: {}".format(src.path),
+            )
+            generated_sources.append(src_symlink)
+        else:
+            generated_sources.append(src)
+
+    return generated_sources, generated_root
+
+
+def _generate_output_diagnostics(ctx, sibling, require_process_wrapper = True):
+    """Generates a .rustc-output file if it's required.
+
+    Args:
+        ctx: (ctx): The current rule's context object
+        sibling: (File): The file to generate the diagnostics for.
+        require_process_wrapper: (bool): Whether to require the process wrapper
+          in order to generate the .rustc-output file.
+    Returns:
+        Optional[File] The .rustc-object file, if generated.
+    """
+
+    # Since this feature requires error_format=json, we usually need
+    # process_wrapper, since it can write the json here, then convert it to the
+    # regular error format so the user can see the error properly.
+    if require_process_wrapper and not ctx.attr._process_wrapper:
+        return None
+    provider = ctx.attr._output_diagnostics[OutputDiagnosticsInfo]
+    if not provider.output_diagnostics:
+        return None
+
+    return ctx.actions.declare_file(
+        sibling.basename + ".rustc-output",
+        sibling = sibling,
+    )
+
+def _generate_output_diagnostics(ctx, sibling, require_process_wrapper = True):
+    """Generates a .rustc-output file if it's required.
+
+    Args:
+        ctx: (ctx): The current rule's context object
+        sibling: (File): The file to generate the diagnostics for.
+        require_process_wrapper: (bool): Whether to require the process wrapper
+          in order to generate the .rustc-output file.
+    Returns:
+        Optional[File] The .rustc-object file, if generated.
+    """
+
+    # Since this feature requires error_format=json, we usually need
+    # process_wrapper, since it can write the json here, then convert it to the
+    # regular error format so the user can see the error properly.
+    if require_process_wrapper and not ctx.attr._process_wrapper:
+        return None
+    provider = ctx.attr._output_diagnostics[OutputDiagnosticsInfo]
+    if not provider.output_diagnostics:
+        return None
+
+    return ctx.actions.declare_file(
+        sibling.basename + ".rustc-output",
+        sibling = sibling,
+    )
 
 def _rust_library_impl(ctx):
     """The implementation of the `rust_library` rule.
@@ -155,10 +325,51 @@ def _rust_library_common(ctx, crate_type):
     else:
         output_hash = determine_output_hash(crate_root, ctx.label)
 
+    crate_name = compute_crate_name(ctx.workspace_name, ctx.label, toolchain, ctx.attr.crate_name)
+    rust_lib_name = _determine_lib_name(
+        crate_name,
+        crate_type,
+        toolchain,
+        output_hash,
+    )
+    rust_lib = ctx.actions.declare_file(rust_lib_name)
+
+    rust_metadata = None
+    rustc_rmeta_output = None
+    if can_build_metadata(toolchain, ctx, crate_type) and not ctx.attr.disable_pipelining:
+        rust_metadata = ctx.actions.declare_file(
+            paths.replace_extension(rust_lib_name, ".rmeta"),
+            sibling = rust_lib,
+        )
+        rustc_rmeta_output = _generate_output_diagnostics(ctx, rust_metadata)
+
+    deps = transform_deps(ctx.attr.deps)
+    proc_macro_deps = transform_deps(ctx.attr.proc_macro_deps + get_import_macro_deps(ctx))
+
     return rustc_compile_action(
         ctx = ctx,
         attr = ctx.attr,
         toolchain = toolchain,
+        crate_info = rust_common.create_crate_info(
+            name = crate_name,
+            type = crate_type,
+            root = crate_root,
+            srcs = depset(srcs),
+            deps = depset(deps),
+            proc_macro_deps = depset(proc_macro_deps),
+            aliases = ctx.attr.aliases,
+            output = rust_lib,
+            rustc_output = _generate_output_diagnostics(ctx, rust_lib),
+            metadata = rust_metadata,
+            rustc_rmeta_output = rustc_rmeta_output,
+            edition = get_edition(ctx.attr, toolchain, ctx.label),
+            rustc_env = ctx.attr.rustc_env,
+            rustc_env_files = ctx.files.rustc_env_files,
+            is_test = False,
+            compile_data = depset(ctx.files.compile_data),
+            compile_data_targets = depset(ctx.attr.compile_data),
+            owner = ctx.label,
+        ),
         output_hash = output_hash,
         crate_type = crate_type,
         create_crate_info_callback = create_crate_info_dict,
@@ -200,6 +411,7 @@ def _rust_binary_impl(ctx):
             proc_macro_deps = depset(proc_macro_deps),
             aliases = ctx.attr.aliases,
             output = output,
+            rustc_output = _generate_output_diagnostics(ctx, output),
             edition = get_edition(ctx.attr, toolchain, ctx.label),
             _rustc_env_attr = ctx.attr.rustc_env,
             rustc_env = ctx.attr.rustc_env,
@@ -275,6 +487,7 @@ def _rust_test_impl(ctx):
             proc_macro_deps = depset(proc_macro_deps, transitive = [crate.proc_macro_deps]),
             aliases = ctx.attr.aliases,
             output = output,
+            rustc_output = _generate_output_diagnostics(ctx, output),
             edition = crate.edition,
             rustc_env = rustc_env,
             _rustc_env_attr = ctx.attr.rustc_env,
@@ -319,6 +532,7 @@ def _rust_test_impl(ctx):
             proc_macro_deps = depset(proc_macro_deps),
             aliases = ctx.attr.aliases,
             output = output,
+            rustc_output = _generate_output_diagnostics(ctx, output),
             edition = get_edition(ctx.attr, toolchain, ctx.label),
             rustc_env = rustc_env,
             _rustc_env_attr = ctx.attr.rustc_env,
@@ -595,6 +809,9 @@ _common_attrs = {
     ),
     "_is_proc_macro_dep_enabled": attr.label(
         default = Label("//:is_proc_macro_dep_enabled"),
+    ),
+    "_output_diagnostics": attr.label(
+        default = Label("//:output_diagnostics"),
     ),
     "_per_crate_rustc_flag": attr.label(
         default = Label("//:experimental_per_crate_rustc_flag"),
