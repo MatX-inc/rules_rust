@@ -23,7 +23,7 @@ load(
     "CPP_LINK_STATIC_LIBRARY_ACTION_NAME",
 )
 load("//rust/private:common.bzl", "rust_common")
-load("//rust/private:providers.bzl", _BuildInfo = "BuildInfo")
+load("//rust/private:providers.bzl", _BuildInfo = "BuildInfo", "OutputDiagnosticsInfo")
 load("//rust/private:stamp.bzl", "is_stamping_enabled")
 load(
     "//rust/private:utils.bzl",
@@ -54,11 +54,6 @@ _error_format_values = ["human", "json", "short"]
 ErrorFormatInfo = provider(
     doc = "Set the --error-format flag for all rustc invocations",
     fields = {"error_format": "(string) [" + ", ".join(_error_format_values) + "]"},
-)
-
-OutputDiagnosticsInfo = provider(
-    doc = "Save json diagnostics from rustc (output of rustc --error-format=json)",
-    fields = {"output_diagnostics": "(bool): Whether or not to output diagnostics."},
 )
 
 ExtraRustcFlagsInfo = provider(
@@ -1485,8 +1480,6 @@ def rustc_compile_action(
         output_group_info["pdb_file"] = depset([pdb_file])
     if dsym_folder:
         output_group_info["dsym_folder"] = depset([dsym_folder])
-    if build_metadata:
-        output_group_info["build_metadata"] = depset([build_metadata])
     if build_metadata:
         output_group_info["build_metadata"] = depset([build_metadata])
         if rustc_rmeta_output:

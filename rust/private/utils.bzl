@@ -16,7 +16,7 @@
 
 load("@bazel_skylib//lib:paths.bzl", "paths")
 load("@bazel_tools//tools/cpp:toolchain_utils.bzl", find_rules_cc_toolchain = "find_cpp_toolchain")
-load(":providers.bzl", "BuildInfo", "CrateGroupInfo", "CrateInfo", "DepInfo", "DepVariantInfo")
+load(":providers.bzl", "BuildInfo", "CrateGroupInfo", "CrateInfo", "DepInfo", "DepVariantInfo", "OutputDiagnosticsInfo")
 
 UNSUPPORTED_FEATURES = [
     "thin_lto",
@@ -850,6 +850,32 @@ def _symlink_for_non_generated_source(ctx, src_file, package_root):
     else:
         return src_file
 
+def generate_output_diagnostics(ctx, sibling, require_process_wrapper = True):
+    """Generates a .rustc-output file if it's required.
+
+    Args:
+        ctx: (ctx): The current rule's context object
+        sibling: (File): The file to generate the diagnostics for.
+        require_process_wrapper: (bool): Whether to require the process wrapper
+          in order to generate the .rustc-output file.
+    Returns:
+        Optional[File] The .rustc-object file, if generated.
+    """
+
+    # Since this feature requires error_format=json, we usually need
+    # process_wrapper, since it can write the json here, then convert it to the
+    # regular error format so the user can see the error properly.
+    if require_process_wrapper and not ctx.attr._process_wrapper:
+        return None
+    provider = ctx.attr._output_diagnostics[OutputDiagnosticsInfo]
+    if not provider.output_diagnostics:
+        return None
+
+    return ctx.actions.declare_file(
+        sibling.basename + ".rustc-output",
+        sibling = sibling,
+    )
+
 def create_crate_info_dict(ctx, toolchain, crate_type):
     """Creates a mutable dict() representing CrateInfo provider
 
@@ -888,11 +914,13 @@ def create_crate_info_dict(ctx, toolchain, crate_type):
     )
     rust_lib = ctx.actions.declare_file(rust_lib_name)
     rust_metadata = None
+    rustc_rmeta_output = None
     if can_build_metadata(toolchain, ctx, crate_type) and not ctx.attr.disable_pipelining:
         rust_metadata = ctx.actions.declare_file(
             paths.replace_extension(rust_lib_name, ".rmeta"),
             sibling = rust_lib,
         )
+        rustc_rmeta_output = generate_output_diagnostics(ctx, rust_metadata)
 
     return dict(
         name = crate_name,
@@ -903,7 +931,9 @@ def create_crate_info_dict(ctx, toolchain, crate_type):
         proc_macro_deps = depset(proc_macro_deps),
         aliases = ctx.attr.aliases,
         output = rust_lib,
+        rustc_output = generate_output_diagnostics(ctx, rust_lib),
         metadata = rust_metadata,
+        rustc_rmeta_output = rustc_rmeta_output,
         edition = get_edition(ctx.attr, toolchain, ctx.label),
         rustc_env = ctx.attr.rustc_env,
         rustc_env_files = ctx.files.rustc_env_files,

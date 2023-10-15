@@ -142,3 +142,8 @@ TestCrateInfo = provider(
         "crate": "CrateInfo: The underlying CrateInfo of the dependency",
     },
 )
+
+OutputDiagnosticsInfo = provider(
+    doc = "Save json diagnostics from rustc (output of rustc --error-format=json)",
+    fields = {"output_diagnostics": "(bool): Whether or not to output diagnostics."},
+)

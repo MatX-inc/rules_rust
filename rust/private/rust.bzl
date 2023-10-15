@@ -15,8 +15,8 @@
 """Rust rule implementations"""
 
 load("//rust/private:common.bzl", "rust_common")
-load("//rust/private:providers.bzl", "BuildInfo")
-load("//rust/private:rustc.bzl", "OutputDiagnosticsInfo", "rustc_compile_action")
+load("//rust/private:providers.bzl", "BuildInfo", "OutputDiagnosticsInfo")
+load("//rust/private:rustc.bzl", "rustc_compile_action")
 load(
     "//rust/private:utils.bzl",
     "compute_crate_name",
@@ -26,6 +26,7 @@ load(
     "determine_output_hash",
     "expand_dict_value_locations",
     "find_toolchain",
+    "generate_output_diagnostics",
     "get_edition",
     "get_import_macro_deps",
     "transform_deps",
@@ -66,32 +67,6 @@ def _assert_correct_dep_mapping(ctx):
                     type,
                 ),
             )
-
-def _generate_output_diagnostics(ctx, sibling, require_process_wrapper = True):
-    """Generates a .rustc-output file if it's required.
-
-    Args:
-        ctx: (ctx): The current rule's context object
-        sibling: (File): The file to generate the diagnostics for.
-        require_process_wrapper: (bool): Whether to require the process wrapper
-          in order to generate the .rustc-output file.
-    Returns:
-        Optional[File] The .rustc-object file, if generated.
-    """
-
-    # Since this feature requires error_format=json, we usually need
-    # process_wrapper, since it can write the json here, then convert it to the
-    # regular error format so the user can see the error properly.
-    if require_process_wrapper and not ctx.attr._process_wrapper:
-        return None
-    provider = ctx.attr._output_diagnostics[OutputDiagnosticsInfo]
-    if not provider.output_diagnostics:
-        return None
-
-    return ctx.actions.declare_file(
-        sibling.basename + ".rustc-output",
-        sibling = sibling,
-    )
 
 def _rust_library_impl(ctx):
     """The implementation of the `rust_library` rule.
@@ -226,7 +201,7 @@ def _rust_binary_impl(ctx):
             proc_macro_deps = depset(proc_macro_deps),
             aliases = ctx.attr.aliases,
             output = output,
-            rustc_output = _generate_output_diagnostics(ctx, output),
+            rustc_output = generate_output_diagnostics(ctx, output),
             edition = get_edition(ctx.attr, toolchain, ctx.label),
             _rustc_env_attr = ctx.attr.rustc_env,
             rustc_env = ctx.attr.rustc_env,
@@ -302,7 +277,7 @@ def _rust_test_impl(ctx):
             proc_macro_deps = depset(proc_macro_deps, transitive = [crate.proc_macro_deps]),
             aliases = ctx.attr.aliases,
             output = output,
-            rustc_output = _generate_output_diagnostics(ctx, output),
+            rustc_output = generate_output_diagnostics(ctx, output),
             edition = crate.edition,
             rustc_env = rustc_env,
             _rustc_env_attr = ctx.attr.rustc_env,
@@ -347,7 +322,7 @@ def _rust_test_impl(ctx):
             proc_macro_deps = depset(proc_macro_deps),
             aliases = ctx.attr.aliases,
             output = output,
-            rustc_output = _generate_output_diagnostics(ctx, output),
+            rustc_output = generate_output_diagnostics(ctx, output),
             edition = get_edition(ctx.attr, toolchain, ctx.label),
             rustc_env = rustc_env,
             _rustc_env_attr = ctx.attr.rustc_env,
